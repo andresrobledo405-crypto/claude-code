@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JARVIS</title>
+<style>
+  :root { --blue:#2e9bff; --orange:#ff9a2e; --bg:#02050c; --ink:#9fd0ff; }
+  * { box-sizing:border-box; margin:0; }
+  html,body { height:100%; background:var(--bg); color:var(--ink); overflow:hidden;
+    font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  canvas { position:fixed; inset:0; width:100%; height:100%; display:block; }
+  #status { position:fixed; top:18px; right:max(12px,3vw); max-width:60vw; white-space:nowrap; letter-spacing:.2em; text-transform:uppercase;
+    font-size:11px; color:var(--blue); text-shadow:0 0 8px var(--blue); }
+  #caption { position:fixed; left:50%; bottom:92px; transform:translateX(-50%); width:min(92vw,720px);
+    text-align:center; font:600 20px/1.35 system-ui,sans-serif; color:#fff;
+    text-shadow:0 2px 12px #000; min-height:2.7em; pointer-events:none; }
+  #bar { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); display:flex; gap:8px;
+    width:min(92vw,640px); }
+  #bar input { flex:1; min-width:0; background:#06101fcc; border:1px solid #1d4a7a; color:#dff0ff;
+    padding:10px 14px; border-radius:22px; font:inherit; font-size:14px; outline:none; }
+  #bar input:focus { border-color:var(--blue); box-shadow:0 0 12px #2e9bff55; }
+  button { flex:none; background:#06101fcc; border:1px solid #1d4a7a; color:var(--ink); border-radius:22px;
+    padding:0 16px; cursor:pointer; font:inherit; letter-spacing:.1em; }
+  button:hover,button.on { border-color:var(--orange); color:var(--orange); box-shadow:0 0 12px #ff9a2e55; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="status">STATUS: IDLE</div>
+<div id="caption"></div>
+<form id="bar" autocomplete="off">
+  <input id="txt" placeholder="Escribe o pulsa MIC y habla…" aria-label="Mensaje">
+  <button type="button" id="mic">MIC</button>
+  <button type="submit">ENVIAR</button>
+</form>
+<script>
+"use strict";
+/* ---------- estado ---------- */
+const STATES = { idle:"IDLE", listening:"LISTENING", thinking:"THINKING", speaking:"SPEAKING" };
+let state = "idle", level = 0, targetLevel = 0, t = 0;
+const $ = id => document.getElementById(id);
+function setState(s){ state = s; $("status").textContent = "STATUS: " + STATES[s]; }
+
+/* ---------- canvas ---------- */
+const cv = $("c"), ctx = cv.getContext("2d");
+let W, H, DPR, cx, cy, S;       // S = escala base de la figura
+let parts = [], ridges = [], veins = [], rings = [], dust = [];
+function rnd(a,b){ return a + Math.random()*(b-a); }
+
+/* ancho de la silueta (en unidades de S) para una altura y (0 = coronilla) */
+function halfWidth(y){
+  if (y < 0 || y > 2.35) return 0;
+  if (y < 0.9){ const u=(y-0.45)/0.45; return 0.42*Math.sqrt(Math.max(0,1-u*u)); }       // cabeza
+  if (y < 1.15) return 0.17 + 0.03*Math.sin((y-0.9)*12);                                  // cuello
+  const u = Math.min(1,(y-1.15)/1.0); return 0.17 + 1.05*Math.pow(Math.sin(u*Math.PI/2),0.7);                              // hombros
+}
+
+function build(){
+  DPR = Math.min(devicePixelRatio||1, 2);
+  W = cv.width = innerWidth*DPR; H = cv.height = innerHeight*DPR;
+  S = Math.min(W*0.42, H*0.36); cx = W/2; cy = H*0.30;
+  parts = []; ridges = []; veins = []; dust = [];
+  // contornos horizontales ondulados que rellenan la silueta
+  const rows = 70;
+  for (let r=0; r<rows; r++){
+    const y = 0.05 + r/rows*2.3, w = halfWidth(y);
+    if (w <= 0) continue;
+    const n = Math.floor(w*S/(2.2*DPR));
+    for (let i=0;i<n;i++){
+      const x = rnd(-w,w);
+      parts.push({hx:x, hy:y, row:r, x:0,y:0, vx:0,vy:0, edge:Math.abs(x)/w, a:rnd(.35,1)});
+    }
+    // bordes más densos
+    for (const sgn of [-1,1]) for (let k=0;k<5;k++)
+      parts.push({hx:sgn*w*rnd(.97,1.0), hy:y+rnd(-.01,.01), row:r, x:0,y:0, vx:0,vy:0, edge:1, a:1});
+  }
+  // nube de partículas sobre la cabeza
+  for (let i=0;i<260;i++){
+    const a=rnd(0,Math.PI*2), d=Math.pow(Math.random(),.5)*.5;
+    parts.push({hx:Math.cos(a)*d, hy:.45-Math.abs(Math.sin(a))*d*1.1-.12, row:-1, x:0,y:0,vx:0,vy:0, edge:1, a:rnd(.2,.8)});
+  }
+  for (const p of parts){ p.x = cx + p.hx*S + rnd(-40,40); p.y = cy + p.hy*S + rnd(-40,40); }
+  // montañas laterales
+  for (const side of [-1,1]){
+    const pts = []; let h = rnd(.2,.3);
+    for (let i=0;i<=40;i++){
+      const u = i/40; h += rnd(-.08,.08);
+      const base = 0.55 - u*0.35;                       // más altas junto a la figura
+      pts.push({u, y: H*(0.50 + 0.12*u) - Math.max(.04,base+h*.5)*H*0.45*(1-u*.5)});
+    }
+    ridges.push({side, pts});
+    for (let i=0;i<5;i++){                            // venas naranjas
+      let u = rnd(.05,.8), y = H*rnd(.48,.7), seg=[];
+      for (let k=0;k<rnd(5,10);k++){ seg.push([u,y]); u += rnd(.02,.07); y += rnd(-.04,.05)*H; }
+      veins.push({side, seg});
+    }
+  }
+  for (let i=0;i<900;i++) dust.push({u:Math.random(), y:Math.random(), side:Math.random()<.5?-1:1, tw:rnd(0,6.28), s:rnd(.6,1.8)});
+}
+addEventListener("resize", build); build();
+
+/* ---------- audio (mic) para el nivel ---------- */
+let analyser=null, buf=null;
+async function startMicMeter(){
+  if (analyser) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    const ac = new (window.AudioContext||window.webkitAudioContext)();
+    analyser = ac.createAnalyser(); analyser.fftSize = 512; buf = new Uint8Array(analyser.fftSize);
+    ac.createMediaStreamSource(stream).connect(analyser);
+  } catch(e){ /* sin mic: se anima sintéticamente */ }
+}
+function micLevel(){
+  if (!analyser) return 0;
+  analyser.getByteTimeDomainData(buf); let s=0;
+  for (const v of buf){ const d=(v-128)/128; s+=d*d; }
+  return Math.min(1, Math.sqrt(s/buf.length)*5);
+}
+
+/* ---------- render ---------- */
+function mix(a,b,k){ return [a[0]+(b[0]-a[0])*k, a[1]+(b[1]-a[1])*k, a[2]+(b[2]-a[2])*k]; }
+const BLUE=[46,155,255], ORANGE=[255,154,46], WHITE=[200,230,255];
+
+function frame(ts){
+  t = ts/1000;
+  // nivel objetivo según estado
+  if (state==="listening") targetLevel = Math.max(micLevel(), .08+.04*Math.sin(t*3));
+  else if (state==="speaking") targetLevel = .35 + .3*Math.abs(Math.sin(t*9))*Math.abs(Math.sin(t*3.1));
+  else if (state==="thinking") targetLevel = .18 + .1*Math.sin(t*6);
+  else targetLevel = .05 + .02*Math.sin(t*1.2);
+  level += (targetLevel-level)*.12;
+
+  ctx.globalCompositeOperation="source-over";
+  const g = ctx.createRadialGradient(cx,cy+S*.5,0,cx,cy+S*.5,Math.max(W,H)*.7);
+  g.addColorStop(0,"#07152b"); g.addColorStop(1,"#02050c");
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  ctx.globalCompositeOperation="lighter";
+
+  drawMountains(); drawRings(); drawFigure(); drawCore();
+  requestAnimationFrame(frame);
+}
+
+function drawMountains(){
+  for (const d of dust){                                   // polvo estelar
+    const x = cx + d.side*(S*.55 + d.u*(W/2-S*.55)), y = d.y*H*.9 + H*.05;
+    const a = .15 + .35*Math.abs(Math.sin(t*1.5+d.tw));
+    ctx.fillStyle=`rgba(120,190,255,${a*.6})`; ctx.fillRect(x,y,d.s*DPR,d.s*DPR);
+  }
+  for (const r of ridges){
+    const X = u => cx + r.side*(S*.5 + u*(W/2-S*.5)), jit=level*8*DPR;
+    ctx.beginPath();
+    r.pts.forEach((p,i)=>{ const x=X(p.u), y=p.y+Math.sin(t*2+i)*jit; i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+    ctx.strokeStyle="rgba(60,160,255,.85)"; ctx.lineWidth=1.6*DPR; ctx.shadowColor="#2e9bff"; ctx.shadowBlur=14*DPR; ctx.stroke();
+    ctx.shadowBlur=0;
+    // relleno punteado bajo la cresta
+    for (let i=0;i<r.pts.length-1;i++){
+      const a=r.pts[i], b=r.pts[i+1];
+      for (let k=0;k<14;k++){
+        const u=a.u+(b.u-a.u)*Math.random(), yy=a.y+(b.y-a.y)*((u-a.u)/(b.u-a.u))+Math.random()*H*.18;
+        ctx.fillStyle=`rgba(46,155,255,${Math.random()*.5})`; ctx.fillRect(X(u),yy,1.4*DPR,1.4*DPR);
+      }
+    }
+  }
+  for (const v of veins){
+    ctx.beginPath();
+    v.seg.forEach(([u,y],i)=>{ const x=cx+v.side*(S*.5+u*(W/2-S*.5)); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+    ctx.strokeStyle=`rgba(255,154,46,${.45+level*.8})`; ctx.lineWidth=1.3*DPR;
+    ctx.shadowColor="#ff9a2e"; ctx.shadowBlur=10*DPR; ctx.stroke(); ctx.shadowBlur=0;
+  }
+}
+
+function drawRings(){
+  const fx=cx, fy=cy+S*.55;
+  for (let i=0;i<6;i++){
+    const ph=(t*.35+i/6)%1, r=S*(.75+ph*1.0+level*.5);
+    ctx.beginPath(); ctx.arc(fx,fy,r,0,Math.PI*2);
+    ctx.strokeStyle=`rgba(80,170,255,${(1-ph)*(.25+level*.6)})`; ctx.lineWidth=1.2*DPR; ctx.stroke();
+  }
+  ctx.setLineDash([2*DPR,10*DPR]);
+  ctx.beginPath(); ctx.arc(fx,fy,S*1.2,t*.2,t*.2+Math.PI*2);
+  ctx.strokeStyle="rgba(120,200,255,.35)"; ctx.stroke(); ctx.setLineDash([]);
+}
+
+function drawFigure(){
+  const amp = 1.5*DPR + level*14*DPR, size = 1.5*DPR;
+  const fcx=0, fcy=.62;                                    // centro del rostro
+  for (const p of parts){
+    const wave = p.row<0 ? 0 : Math.sin(t*1.6 + p.row*.45 + p.hx*5)*.012*(1+level*4);
+    const tx = cx + p.hx*S + Math.sin(t*.8+p.hy*9)*amp*.4;
+    const ty = cy + (p.hy+wave)*S + Math.cos(t*.9+p.hx*7)*amp*.4;
+    p.vx += (tx-p.x)*.06; p.vy += (ty-p.y)*.06;
+    p.vx += rnd(-1,1)*level*3*DPR; p.vy += rnd(-1,1)*level*3*DPR;
+    p.vx *= .82; p.vy *= .82; p.x += p.vx; p.y += p.vy;
+    const dFace = Math.hypot(p.hx-fcx,(p.hy-fcy)*1.1);
+    const k = Math.max(0, 1 - dFace/.33);                  // 1 en el núcleo naranja
+    let col = mix(BLUE, WHITE, p.edge*.35);
+    col = mix(col, ORANGE, Math.pow(k,.8) * (.75+level*.5));
+    const a = p.a*(.55+.4*p.edge) + k*.4;
+    ctx.fillStyle=`rgba(${col[0]|0},${col[1]|0},${col[2]|0},${Math.min(1,a)})`;
+    ctx.fillRect(p.x, p.y, size, size);
+  }
+  // líneas de energía naranja en cuello/pecho
+  ctx.strokeStyle=`rgba(255,154,46,${.5+level})`; ctx.lineWidth=1.4*DPR;
+  ctx.shadowColor="#ff9a2e"; ctx.shadowBlur=10*DPR;
+  for (let i=-2;i<=2;i++){
+    ctx.beginPath(); ctx.moveTo(cx+i*S*.03, cy+1.0*S);
+    for (let k=1;k<=8;k++){
+      const y=1.0+k*.11; ctx.lineTo(cx+i*S*.03*(1+k*.5)+Math.sin(t*3+k+i)*S*.012*(1+level*3), cy+y*S);
+    }
+    ctx.stroke();
+  }
+  ctx.shadowBlur=0;
+}
+
+function drawCore(){
+  const x=cx, y=cy+.62*S, r=S*(.26+level*.12);
+  const g=ctx.createRadialGradient(x,y,0,x,y,r);
+  g.addColorStop(0,`rgba(255,190,90,${.55+level*.4})`);
+  g.addColorStop(.5,`rgba(255,130,30,${.3+level*.3})`);
+  g.addColorStop(1,"rgba(255,120,20,0)");
+  ctx.fillStyle=g; ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill();
+}
+requestAnimationFrame(frame);
+
+/* ---------- voz + conversación ---------- */
+const cap = $("caption"); let history = [];
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec=null, listening=false;
+
+function say(text){
+  cap.textContent = text;
+  if (!("speechSynthesis" in window)){ setState("idle"); return; }
+  const u = new SpeechSynthesisUtterance(text.replace(/[*_`#]/g,""));
+  u.lang = navigator.language || "es-ES"; u.rate = 1.02;
+  u.onstart = ()=>setState("speaking"); u.onend = u.onerror = ()=>setState("idle");
+  speechSynthesis.cancel(); speechSynthesis.speak(u);
+}
+
+async function ask(text){
+  text = text.trim(); if (!text) return;
+  cap.textContent = text; $("txt").value = ""; setState("thinking");
+  history.push({role:"user", content:text});
+  try {
+    const r = await fetch("/api/chat", {method:"POST", headers:{"content-type":"application/json"},
+      body:JSON.stringify({messages:history.slice(-20)})});
+    if (!r.ok) throw new Error((await r.json().catch(()=>({}))).error || r.statusText);
+    const {reply} = await r.json();
+    history.push({role:"assistant", content:reply}); say(reply);
+  } catch(e){
+    history.pop();
+    const msg = "No pude conectar con Claude: " + e.message + ". Inicia el servidor con: node jarvis/server.mjs";
+    cap.textContent = msg; setState("idle");
+  }
+}
+$("bar").addEventListener("submit", e=>{ e.preventDefault(); ask($("txt").value); });
+
+$("mic").addEventListener("click", async ()=>{
+  if (!SR){ cap.textContent="Tu navegador no soporta reconocimiento de voz. Usa Chrome o Edge, o escribe."; return; }
+  if (listening){ rec.stop(); return; }
+  speechSynthesis.cancel(); await startMicMeter();
+  rec = new SR(); rec.lang = navigator.language || "es-ES"; rec.interimResults = true;
+  rec.onstart = ()=>{ listening=true; $("mic").classList.add("on"); setState("listening"); };
+  rec.onresult = e=>{ let s=""; for (const r of e.results) s+=r[0].transcript; cap.textContent=s;
+    if (e.results[e.results.length-1].isFinal) ask(s); };
+  rec.onend = ()=>{ listening=false; $("mic").classList.remove("on"); if (state==="listening") setState("idle"); };
+  rec.onerror = ()=>{ listening=false; $("mic").classList.remove("on"); setState("idle"); };
+  rec.start();
+});
+</script>
+</body>
+</html>
